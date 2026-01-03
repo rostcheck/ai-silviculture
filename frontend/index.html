@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forest Video Analyzer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .upload-area {
+            border: 3px dashed #4CAF50;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            margin: 20px 0;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .upload-area:hover {
+            background-color: #f9f9f9;
+        }
+        .upload-area.dragover {
+            background-color: #e8f5e8;
+            border-color: #2e7d32;
+        }
+        .progress {
+            width: 100%;
+            height: 20px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 20px 0;
+            display: none;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s;
+        }
+        .status {
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            display: none;
+        }
+        .status.processing {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+        .status.completed {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 5px;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+        .btn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .results {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            margin: 20px 0;
+            display: none;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌲 Forest Video Analyzer</h1>
+        <p>Upload your GoPro forestry videos to analyze tree cutting events and species identification.</p>
+        
+        <div class="upload-area" id="uploadArea">
+            <h3>📹 Drop your MP4 video here or click to select</h3>
+            <p>Supported format: MP4 files from GoPro cameras</p>
+            <input type="file" id="fileInput" accept=".mp4" style="display: none;">
+        </div>
+        
+        <div class="progress" id="progressContainer">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+        
+        <div class="status" id="statusContainer">
+            <span id="statusText"></span>
+        </div>
+        
+        <div class="results" id="resultsContainer">
+            <h3>Analysis Results</h3>
+            <div id="resultsContent"></div>
+            <button class="btn" id="downloadBtn" onclick="downloadReport()">📄 Download Full Report</button>
+        </div>
+        
+        <button class="btn" id="uploadBtn" onclick="selectFile()" disabled>Select Video File</button>
+        <button class="btn" id="resetBtn" onclick="resetForm()" style="display: none;">Upload Another Video</button>
+    </div>
+
+    <script>
+        const API_BASE = 'https://httpbin.org'; // Temporary placeholder for testing
+        let currentJobId = null;
+        let reportUrl = null;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            setupEventListeners();
+            document.getElementById('uploadBtn').disabled = false;
+        });
+
+        function setupEventListeners() {
+            const uploadArea = document.getElementById('uploadArea');
+            const fileInput = document.getElementById('fileInput');
+
+            uploadArea.addEventListener('click', () => fileInput.click());
+            uploadArea.addEventListener('dragover', handleDragOver);
+            uploadArea.addEventListener('dragleave', handleDragLeave);
+            uploadArea.addEventListener('drop', handleDrop);
+            fileInput.addEventListener('change', handleFileSelect);
+        }
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            e.currentTarget.classList.add('dragover');
+        }
+
+        function handleDragLeave(e) {
+            e.currentTarget.classList.remove('dragover');
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                processFile(files[0]);
+            }
+        }
+
+        function selectFile() {
+            document.getElementById('fileInput').click();
+        }
+
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (file) {
+                processFile(file);
+            }
+        }
+
+        async function processFile(file) {
+            if (!file.type.includes('mp4')) {
+                showStatus('error', 'Please select an MP4 video file.');
+                return;
+            }
+
+            try {
+                showStatus('processing', 'Preparing upload...');
+                
+                // Mock the upload process for now
+                const mockJobId = 'job-' + Date.now();
+                
+                showStatus('processing', 'Uploading video...');
+                showProgress(50);
+                
+                // Simulate upload delay
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                showProgress(100);
+                showStatus('processing', 'Video uploaded successfully! Processing with AI...');
+                
+                // Mock processing
+                currentJobId = mockJobId;
+                setTimeout(() => {
+                    const mockResults = {
+                        trees_cut: 3,
+                        events: [
+                            {'timestamp': '00:02:15', 'species': 'Oak', 'diameter': 18},
+                            {'timestamp': '00:05:42', 'species': 'Pine', 'diameter': 14},
+                            {'timestamp': '00:08:30', 'species': 'Maple', 'diameter': 16}
+                        ]
+                    };
+                    
+                    showStatus('completed', 'Analysis completed successfully!');
+                    hideProgress();
+                    showResults(mockResults);
+                    reportUrl = '#'; // Mock report URL
+                    document.getElementById('resetBtn').style.display = 'inline-block';
+                }, 3000);
+                
+            } catch (error) {
+                showStatus('error', `Upload failed: ${error.message}`);
+                hideProgress();
+            }
+        }
+
+        async function pollForResults() {
+            try {
+                const response = await fetch(`${API_BASE}/status/${currentJobId}`);
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to check status');
+                }
+
+                switch (data.status) {
+                    case 'processing':
+                        showStatus('processing', 'Analyzing video with AI... This may take a few minutes.');
+                        setTimeout(pollForResults, 5000); // Poll every 5 seconds
+                        break;
+                        
+                    case 'completed':
+                        showStatus('completed', 'Analysis completed successfully!');
+                        hideProgress();
+                        showResults(data.results);
+                        reportUrl = data.reportUrl;
+                        document.getElementById('resetBtn').style.display = 'inline-block';
+                        break;
+                        
+                    case 'failed':
+                        showStatus('error', 'Processing failed. Please try again.');
+                        hideProgress();
+                        break;
+                        
+                    default:
+                        setTimeout(pollForResults, 5000);
+                }
+                
+            } catch (error) {
+                showStatus('error', `Status check failed: ${error.message}`);
+                hideProgress();
+            }
+        }
+
+        function showStatus(type, message) {
+            const container = document.getElementById('statusContainer');
+            const text = document.getElementById('statusText');
+            
+            container.className = `status ${type}`;
+            container.style.display = 'block';
+            text.textContent = message;
+        }
+
+        function showProgress(percent) {
+            const container = document.getElementById('progressContainer');
+            const bar = document.getElementById('progressBar');
+            
+            container.style.display = 'block';
+            bar.style.width = `${percent}%`;
+        }
+
+        function hideProgress() {
+            document.getElementById('progressContainer').style.display = 'none';
+        }
+
+        function showResults(results) {
+            const container = document.getElementById('resultsContainer');
+            const content = document.getElementById('resultsContent');
+            
+            let html = `
+                <h4>📊 Summary</h4>
+                <p><strong>Total Trees Cut:</strong> ${results.trees_cut}</p>
+                
+                <h4>🌳 Cutting Events</h4>
+                <ul>
+            `;
+            
+            results.events.forEach(event => {
+                html += `<li><strong>${event.timestamp}</strong> - ${event.species} (Est. ${event.diameter}" diameter)</li>`;
+            });
+            
+            html += '</ul>';
+            content.innerHTML = html;
+            container.style.display = 'block';
+        }
+
+        function downloadReport() {
+            if (reportUrl && reportUrl !== '#') {
+                window.open(reportUrl, '_blank');
+            } else {
+                // Generate mock report for download
+                const mockReport = `FOREST HARVESTING REPORT
+========================
+Video: ${document.getElementById('fileInput').files[0]?.name || 'sample_video.mp4'}
+Date: ${new Date().toISOString().split('T')[0]}
+
+SUMMARY
+-------
+Total Trees Cut: 3
+
+CUTTING EVENTS
+--------------
+1. 00:02:15 - Oak (Est. 18" diameter)
+2. 00:05:42 - Pine (Est. 14" diameter)  
+3. 00:08:30 - Maple (Est. 16" diameter)
+
+SPECIES BREAKDOWN
+-----------------
+Oak: 1 tree
+Pine: 1 tree
+Maple: 1 tree
+
+--- End of Report ---
+Generated by Forest Video Analyzer v1.0`;
+
+                const blob = new Blob([mockReport], { type: 'text/plain' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'forest_analysis_report.txt';
+                a.click();
+                window.URL.revokeObjectURL(url);
+            }
+        }
+
+        function resetForm() {
+            // Reset all elements
+            document.getElementById('statusContainer').style.display = 'none';
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('resultsContainer').style.display = 'none';
+            document.getElementById('resetBtn').style.display = 'none';
+            document.getElementById('fileInput').value = '';
+            
+            currentJobId = null;
+            reportUrl = null;
+        }
+    </script>
+</body>
+</html>

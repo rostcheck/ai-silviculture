@@ -1,0 +1,12 @@
+{
+  "name": "forest-video-analyzer",
+  "version": "1.0.0",
+  "description": "AWS serverless application for analyzing forestry videos with TwelveLabs Pegasus",
+  "scripts": {
+    "deploy": "aws cloudformation deploy --template-file infrastructure.yaml --stack-name forest-analyzer --capabilities CAPABILITY_IAM",
+    "build": "zip -r lambda-functions.zip lambda/ -x '*.pyc' '__pycache__/*'",
+    "upload-site": "aws s3 sync frontend/ s3://forest-website-bucket --delete"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
