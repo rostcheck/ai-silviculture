@@ -1,0 +1,829 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Forest Video Analyzer - Complete Implementation'
+
+Resources:
+  # S3 Buckets
+  VideoInputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'forest-videos-input-${AWS::AccountId}'
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
+            AllowedOrigins: ['*']
+            ExposedHeaders: [ETag]
+            MaxAge: 3000
+
+  ReportOutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'forest-reports-output-${AWS::AccountId}'
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'forest-website-${AWS::AccountId}'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${WebsiteBucket}/*'
+
+  # DynamoDB Table
+  ProcessingResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: forest-processing-results
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+
+  # IAM Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: forest-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ForestAnalyzerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${VideoInputBucket}/*'
+                  - !Sub 'arn:aws:s3:::${ReportOutputBucket}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketNotification
+                Resource:
+                  - !Sub 'arn:aws:s3:::${VideoInputBucket}'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt ProcessingResultsTable.Arn
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - 'arn:aws:bedrock:us-east-1:*:foundation-model/twelvelabs.pegasus-1-2-v1:0'
+                  - 'arn:aws:bedrock:us-east-1:*:inference-profile/us.twelvelabs.pegasus-1-2-v1:0'
+                  - 'arn:aws:bedrock:us-east-2:*:foundation-model/twelvelabs.pegasus-1-2-v1:0'
+                  - 'arn:aws:bedrock:us-west-1:*:foundation-model/twelvelabs.pegasus-1-2-v1:0'
+                  - 'arn:aws:bedrock:us-west-2:*:foundation-model/twelvelabs.pegasus-1-2-v1:0'
+
+  # Lambda Functions
+  UploadHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: forest-upload-handler
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import uuid
+          import os
+          
+          s3 = boto3.client('s3')
+          
+          def lambda_handler(event, context):
+              try:
+                  body = json.loads(event.get('body', '{}'))
+                  filename = body.get('filename', 'video.mp4')
+                  file_size = body.get('fileSize', 0)
+                  job_id = str(uuid.uuid4())
+                  
+                  bucket_name = os.environ['BUCKET_NAME']
+                  key = f'{job_id}/{filename}'
+                  
+                  # For large files (>100MB), use multipart upload
+                  if file_size > 100 * 1024 * 1024:
+                      response = s3.create_multipart_upload(
+                          Bucket=bucket_name,
+                          Key=key,
+                          ContentType='video/mp4'
+                      )
+                      upload_id = response['UploadId']
+                      
+                      part_size = max(5 * 1024 * 1024, file_size // 1000)
+                      part_count = (file_size + part_size - 1) // part_size
+                      
+                      presigned_urls = []
+                      for part_num in range(1, part_count + 1):
+                          presigned_url = s3.generate_presigned_url(
+                              'upload_part',
+                              Params={
+                                  'Bucket': bucket_name,
+                                  'Key': key,
+                                  'PartNumber': part_num,
+                                  'UploadId': upload_id
+                              },
+                              ExpiresIn=3600
+                          )
+                          presigned_urls.append({
+                              'partNumber': part_num,
+                              'url': presigned_url
+                          })
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Headers': 'Content-Type',
+                              'Access-Control-Allow-Methods': 'POST, OPTIONS'
+                          },
+                          'body': json.dumps({
+                              'jobId': job_id,
+                              'uploadType': 'multipart',
+                              'uploadId': upload_id,
+                              'partSize': part_size,
+                              'presignedUrls': presigned_urls,
+                              'bucket': bucket_name,
+                              'key': key
+                          })
+                      }
+                  else:
+                      presigned_url = s3.generate_presigned_url(
+                          'put_object',
+                          Params={
+                              'Bucket': bucket_name,
+                              'Key': key,
+                              'ContentType': 'video/mp4'
+                          },
+                          ExpiresIn=3600
+                      )
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Headers': 'Content-Type',
+                              'Access-Control-Allow-Methods': 'POST, OPTIONS'
+                          },
+                          'body': json.dumps({
+                              'jobId': job_id,
+                              'uploadType': 'single',
+                              'uploadUrl': presigned_url
+                          })
+                      }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref VideoInputBucket
+
+  CompleteUploadFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: forest-complete-upload
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          s3 = boto3.client('s3')
+          
+          def lambda_handler(event, context):
+              try:
+                  body = json.loads(event['body'])
+                  bucket = body['bucket']
+                  key = body['key']
+                  upload_id = body['uploadId']
+                  parts = body['parts']
+                  
+                  response = s3.complete_multipart_upload(
+                      Bucket=bucket,
+                      Key=key,
+                      UploadId=upload_id,
+                      MultipartUpload={'Parts': parts}
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({
+                          'success': True,
+                          'location': response['Location']
+                      })
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  VideoProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: forest-video-processor
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          # Updated to use AWS Bedrock TwelveLabs Pegasus - v2.1
+          import json
+          import boto3
+          import time
+          import os
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+          table = dynamodb.Table(os.environ['TABLE_NAME'])
+          
+          def lambda_handler(event, context):
+              try:
+                  bucket = event['Records'][0]['s3']['bucket']['name']
+                  key = event['Records'][0]['s3']['object']['key']
+                  job_id = key.split('/')[0]
+                  filename = key.split('/')[-1]
+                  
+                  print(f"Processing video: {filename} for job: {job_id}")
+                  
+                  # Update status to processing
+                  table.put_item(Item={
+                      'jobId': job_id,
+                      'status': 'processing',
+                      'filename': filename,
+                      'timestamp': int(time.time()),
+                      'startTime': datetime.utcnow().isoformat()
+                  })
+                  
+                  # Get video URL for TwelveLabs
+                  video_url = s3.generate_presigned_url(
+                      'get_object',
+                      Params={'Bucket': bucket, 'Key': key},
+                      ExpiresIn=7200
+                  )
+                  
+                  # Process with AWS Bedrock TwelveLabs Pegasus
+                  results = analyze_with_bedrock_pegasus(bucket, key, filename)
+                  
+                  # Generate report
+                  report = generate_report(results, filename)
+                  
+                  # Save report to S3
+                  report_bucket = os.environ['REPORT_BUCKET']
+                  report_key = f'{job_id}/report.txt'
+                  
+                  s3.put_object(
+                      Bucket=report_bucket,
+                      Key=report_key,
+                      Body=report,
+                      ContentType='text/plain'
+                  )
+                  
+                  # Update final status
+                  table.put_item(Item={
+                      'jobId': job_id,
+                      'status': 'completed',
+                      'filename': filename,
+                      'reportKey': report_key,
+                      'results': results,
+                      'timestamp': int(time.time()),
+                      'completedTime': datetime.utcnow().isoformat()
+                  })
+                  
+                  print(f"Successfully processed {filename}")
+                  return {'statusCode': 200}
+                  
+              except Exception as e:
+                  print(f"Error processing video: {str(e)}")
+                  table.put_item(Item={
+                      'jobId': job_id,
+                      'status': 'failed',
+                      'filename': filename,
+                      'error': str(e),
+                      'timestamp': int(time.time())
+                  })
+                  raise
+          
+          def analyze_with_bedrock_pegasus(bucket, key, filename):
+              try:
+                  # Use inference profile for us-east-1
+                  model_id = "us.twelvelabs.pegasus-1-2-v1:0"
+                  
+                  body = {
+                      "inputPrompt": "Analyze this forestry video and return JSON: {\"trees_cut\": total_number, \"events\": [{\"timestamp\": \"MM:SS when tree begins to fall\", \"species\": \"name\", \"diameter\": inches}]} for each tree cutting event observed.",
+                      "mediaSource": {
+                          "s3Location": {
+                              "uri": f"s3://{bucket}/{key}",
+                              "bucketOwner": "714627338066"
+                          }
+                      }
+                  }
+                  
+                  response = bedrock.invoke_model(
+                      modelId=model_id,
+                      body=json.dumps(body)
+                  )
+                  
+                  result = json.loads(response["body"].read())
+                  analysis_text = result.get("message", "")
+                  
+                  print(f"TwelveLabs raw response: {result}")
+                  print(f"Analysis text: {analysis_text}")
+                  
+                  # Parse the analysis text to extract structured data
+                  return parse_analysis_text(analysis_text)
+                  
+              except Exception as e:
+                  print(f"Bedrock Pegasus analysis failed: {str(e)}")
+                  raise
+          
+          def parse_analysis_text(text):
+              import re
+              
+              print(f"Parsing analysis text: {text}")
+              
+              # Try to parse as JSON first
+              try:
+                  import json
+                  data = json.loads(text.strip())
+                  print(f"Successfully parsed JSON: {data}")
+                  
+                  # Extract structured data
+                  trees_cut = data.get('trees_cut', 0)
+                  events = []
+                  
+                  for event in data.get('events', []):
+                      # Handle diameter as string or number
+                      diameter = event.get('diameter', 'Unknown')
+                      if isinstance(diameter, str) and 'inches' in diameter:
+                          diameter = diameter.replace(' inches', '').strip()
+                      
+                      events.append({
+                          'timestamp': event.get('timestamp', 'Unknown'),
+                          'species': event.get('species', 'Unidentified'),
+                          'diameter': diameter
+                      })
+                  
+                  result = {
+                      'trees_cut': trees_cut,
+                      'events': events
+                  }
+                  
+                  print(f"Parsed JSON result: {result}")
+                  return result
+                  
+              except json.JSONDecodeError:
+                  print("Not valid JSON, falling back to text parsing")
+                  # Fallback to original text parsing if JSON fails
+                  pass
+              
+              # Original text parsing as fallback
+              cutting_indicators = ['cutting', 'cut', 'chainsaw', 'tree', 'fall', 'cutting down']
+              has_cutting = any(indicator in text.lower() for indicator in cutting_indicators)
+              
+              timestamp_pattern = r'(\d{1,2}:\d{2})'
+              timestamps = re.findall(timestamp_pattern, text)
+              
+              species_pattern = r'(oak|pine|maple|birch|cedar|fir|spruce)'
+              species_matches = re.findall(species_pattern, text, re.IGNORECASE)
+              
+              events = []
+              if timestamps and has_cutting:
+                  for i, timestamp in enumerate(timestamps):
+                      species = species_matches[i].capitalize() if i < len(species_matches) else "Unidentified"
+                      events.append({
+                          'timestamp': timestamp,
+                          'species': species,
+                          'diameter': 'Unknown'
+                      })
+              
+              trees_cut = len(events) if events else 0
+              
+              result = {
+                  'trees_cut': trees_cut,
+                  'events': events
+              }
+              
+              print(f"Text parsing result: {result}")
+              return result
+          
+          def generate_report(results, filename):
+              report = f"FOREST HARVESTING REPORT\\n"
+              report += f"========================\\n"
+              report += f"Video: {filename}\\n"
+              report += f"Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\\n"
+              report += f"Analysis: AWS Bedrock TwelveLabs Pegasus AI\\n\\n"
+              report += f"SUMMARY\\n-------\\n"
+              report += f"Total Trees Cut: {results['trees_cut']}\\n\\n"
+              
+              if results['events']:
+                  report += f"CUTTING EVENTS\\n--------------\\n"
+                  for i, event in enumerate(results['events'], 1):
+                      diameter_str = f" (Est. {event['diameter']}\" diameter)" if event['diameter'] != "Unknown" else " (Diameter: Unknown)"
+                      report += f"{i}. {event['timestamp']} - {event['species']}{diameter_str}\\n"
+              else:
+                  report += f"CUTTING EVENTS\\n--------------\\n"
+                  report += f"No clear cutting events detected in video analysis.\\n"
+              
+              if 'analysis_notes' in results:
+                  report += f"\\nAI ANALYSIS NOTES\\n-----------------\\n"
+                  report += f"{results['analysis_notes']}\\n"
+              
+              report += f"\\n--- End of Report ---\\n"
+              return report
+      Environment:
+        Variables:
+          TABLE_NAME: forest-processing-results
+          REPORT_BUCKET: forest-reports-output-714627338066
+
+  StatusCheckerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: forest-status-checker
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from decimal import Decimal
+          
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          table = dynamodb.Table(os.environ['TABLE_NAME'])
+          
+          def decimal_default(obj):
+              if isinstance(obj, Decimal):
+                  return int(obj)
+              raise TypeError
+          
+          def lambda_handler(event, context):
+              try:
+                  job_id = event['pathParameters']['jobId']
+                  
+                  response = table.get_item(Key={'jobId': job_id})
+                  
+                  if 'Item' not in response:
+                      return {
+                          'statusCode': 404,
+                          'headers': {'Access-Control-Allow-Origin': '*'},
+                          'body': json.dumps({'error': 'Job not found'})
+                      }
+                  
+                  item = response['Item']
+                  result = {
+                      'jobId': job_id,
+                      'status': item['status'],
+                      'filename': item.get('filename', ''),
+                      'timestamp': int(item['timestamp'])
+                  }
+                  
+                  if item['status'] == 'completed':
+                      report_url = s3.generate_presigned_url(
+                          'get_object',
+                          Params={
+                              'Bucket': os.environ['REPORT_BUCKET'],
+                              'Key': item['reportKey']
+                          },
+                          ExpiresIn=3600
+                      )
+                      result['reportUrl'] = report_url
+                      result['results'] = item.get('results', {})
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps(result, default=decimal_default)
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Environment:
+        Variables:
+          TABLE_NAME: forest-processing-results
+          REPORT_BUCKET: forest-reports-output-714627338066
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'forest-api-${AWS::StackName}'
+
+  # Upload endpoint
+  UploadResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: upload
+
+  UploadMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref UploadResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UploadHandlerFunction.Arn}/invocations'
+
+  UploadOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref UploadResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Complete endpoint
+  CompleteResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: complete
+
+  CompleteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref CompleteResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CompleteUploadFunction.Arn}/invocations'
+
+  CompleteOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref CompleteResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Status endpoint
+  StatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: status
+
+  StatusJobResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref StatusResource
+      PathPart: '{jobId}'
+
+  StatusMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref StatusJobResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${StatusCheckerFunction.Arn}/invocations'
+
+  StatusOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref StatusJobResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # API Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - UploadMethod
+      - UploadOptionsMethod
+      - CompleteMethod
+      - CompleteOptionsMethod
+      - StatusMethod
+      - StatusOptionsMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: prod
+
+  # Lambda Permissions
+  UploadHandlerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UploadHandlerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/upload'
+
+  CompleteUploadPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CompleteUploadFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/complete'
+
+  StatusCheckerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StatusCheckerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/status/*'
+
+  VideoProcessorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VideoProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt VideoInputBucket.Arn
+
+  # S3 Bucket Notification (separate resource to avoid circular dependency)
+  BucketNotification:
+    Type: Custom::S3BucketNotification
+    Properties:
+      ServiceToken: !GetAtt BucketNotificationFunction.Arn
+      Bucket: !Ref VideoInputBucket
+      LambdaFunction: !GetAtt VideoProcessorFunction.Arn
+    DependsOn: VideoProcessorPermission
+
+  # Custom resource to handle S3 bucket notifications
+  BucketNotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: forest-bucket-notification
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          s3 = boto3.client('s3')
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                      bucket = event['ResourceProperties']['Bucket']
+                      lambda_function = event['ResourceProperties']['LambdaFunction']
+                      
+                      s3.put_bucket_notification_configuration(
+                          Bucket=bucket,
+                          NotificationConfiguration={
+                              'LambdaFunctionConfigurations': [
+                                  {
+                                      'Id': 'VideoProcessingTrigger',
+                                      'LambdaFunctionArn': lambda_function,
+                                      'Events': ['s3:ObjectCreated:*'],
+                                      'Filter': {
+                                          'Key': {
+                                              'FilterRules': [
+                                                  {
+                                                      'Name': 'suffix',
+                                                      'Value': '.mp4'
+                                                  }
+                                              ]
+                                          }
+                                      }
+                                  }
+                              ]
+                          }
+                      )
+                  elif event['RequestType'] == 'Delete':
+                      bucket = event['ResourceProperties']['Bucket']
+                      s3.put_bucket_notification_configuration(
+                          Bucket=bucket,
+                          NotificationConfiguration={}
+                      )
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  
+  WebsiteURL:
+    Description: Website URL
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+    
+  UploadBucket:
+    Description: S3 bucket for video uploads
+    Value: !Ref VideoInputBucket
+    
+  ReportBucket:
+    Description: S3 bucket for reports
+    Value: !Ref ReportOutputBucket

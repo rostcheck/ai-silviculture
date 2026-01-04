@@ -129,7 +129,7 @@
     </div>
 
     <script>
-        const API_BASE = 'https://httpbin.org'; // Temporary placeholder for testing
+        const API_BASE = 'https://aob792p4nk.execute-api.us-east-1.amazonaws.com/prod';
         let currentJobId = null;
         let reportUrl = null;
 
@@ -188,41 +188,112 @@
             try {
                 showStatus('processing', 'Preparing upload...');
                 
-                // Mock the upload process for now
-                const mockJobId = 'job-' + Date.now();
+                // Check if backend is deployed
+                if (API_BASE.includes('httpbin') || API_BASE.includes('YOUR_API_GATEWAY_URL')) {
+                    throw new Error('Backend not deployed yet. Please run ./deploy.sh to set up the AWS infrastructure.');
+                }
                 
-                showStatus('processing', 'Uploading video...');
-                showProgress(50);
+                // Get upload configuration
+                const response = await fetch(`${API_BASE}/upload`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        filename: file.name,
+                        fileSize: file.size
+                    })
+                });
                 
-                // Simulate upload delay
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                const data = await response.json();
                 
-                showProgress(100);
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to get upload configuration');
+                }
+
+                currentJobId = data.jobId;
+                
+                if (data.uploadType === 'multipart') {
+                    await uploadMultipart(file, data);
+                } else {
+                    await uploadSingle(file, data.uploadUrl);
+                }
+                
                 showStatus('processing', 'Video uploaded successfully! Processing with AI...');
                 
-                // Mock processing
-                currentJobId = mockJobId;
-                setTimeout(() => {
-                    const mockResults = {
-                        trees_cut: 3,
-                        events: [
-                            {'timestamp': '00:02:15', 'species': 'Oak', 'diameter': 18},
-                            {'timestamp': '00:05:42', 'species': 'Pine', 'diameter': 14},
-                            {'timestamp': '00:08:30', 'species': 'Maple', 'diameter': 16}
-                        ]
-                    };
-                    
-                    showStatus('completed', 'Analysis completed successfully!');
-                    hideProgress();
-                    showResults(mockResults);
-                    reportUrl = '#'; // Mock report URL
-                    document.getElementById('resetBtn').style.display = 'inline-block';
-                }, 3000);
+                // Start polling for real results
+                pollForResults();
                 
             } catch (error) {
+                console.error('Upload error:', error);
                 showStatus('error', `Upload failed: ${error.message}`);
                 hideProgress();
             }
+        }
+
+        async function uploadSingle(file, uploadUrl) {
+            showStatus('processing', 'Uploading video...');
+            showProgress(0);
+            
+            const response = await fetch(uploadUrl, {
+                method: 'PUT',
+                body: file,
+                headers: {'Content-Type': 'video/mp4'}
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to upload video');
+            }
+            
+            showProgress(100);
+        }
+
+        async function uploadMultipart(file, uploadConfig) {
+            showStatus('processing', 'Uploading large video in parts...');
+            showProgress(0);
+            
+            const { uploadId, partSize, presignedUrls, bucket, key } = uploadConfig;
+            const parts = [];
+            
+            for (let i = 0; i < presignedUrls.length; i++) {
+                const { partNumber, url } = presignedUrls[i];
+                const start = (partNumber - 1) * partSize;
+                const end = Math.min(start + partSize, file.size);
+                const chunk = file.slice(start, end);
+                
+                const response = await fetch(url, {
+                    method: 'PUT',
+                    body: chunk
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to upload part ${partNumber}`);
+                }
+                
+                const etag = response.headers.get('ETag');
+                parts.push({ ETag: etag, PartNumber: partNumber });
+                
+                // Update progress
+                const progress = Math.round(((i + 1) / presignedUrls.length) * 90);
+                showProgress(progress);
+            }
+            
+            // Complete multipart upload
+            showStatus('processing', 'Finalizing upload...');
+            const completeResponse = await fetch(`${API_BASE}/complete`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    bucket,
+                    key,
+                    uploadId,
+                    parts
+                })
+            });
+            
+            if (!completeResponse.ok) {
+                throw new Error('Failed to complete multipart upload');
+            }
+            
+            showProgress(100);
         }
 
         async function pollForResults() {
@@ -309,38 +380,7 @@
             if (reportUrl && reportUrl !== '#') {
                 window.open(reportUrl, '_blank');
             } else {
-                // Generate mock report for download
-                const mockReport = `FOREST HARVESTING REPORT
-========================
-Video: ${document.getElementById('fileInput').files[0]?.name || 'sample_video.mp4'}
-Date: ${new Date().toISOString().split('T')[0]}
-
-SUMMARY
--------
-Total Trees Cut: 3
-
-CUTTING EVENTS
---------------
-1. 00:02:15 - Oak (Est. 18" diameter)
-2. 00:05:42 - Pine (Est. 14" diameter)  
-3. 00:08:30 - Maple (Est. 16" diameter)
-
-SPECIES BREAKDOWN
------------------
-Oak: 1 tree
-Pine: 1 tree
-Maple: 1 tree
-
---- End of Report ---
-Generated by Forest Video Analyzer v1.0`;
-
-                const blob = new Blob([mockReport], { type: 'text/plain' });
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'forest_analysis_report.txt';
-                a.click();
-                window.URL.revokeObjectURL(url);
+                alert('Report not available yet. Please wait for processing to complete.');
             }
         }
 

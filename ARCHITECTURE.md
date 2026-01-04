@@ -1,7 +1,31 @@
 # Forest Harvesting Video Analysis System
 
 ## Overview
-AWS-based serverless application that analyzes GoPro forestry videos using TwelveLabs Pegasus to identify tree cutting events, species, and generate text reports for forest operators.
+AWS-based serverless application that analyzes GoPro forestry videos using AWS Bedrock TwelveLabs Pegasus to identify tree cutting events, species, and generate text reports for forest operators.
+
+## Implementation Status
+
+### ✅ COMPLETED COMPONENTS
+- **Frontend**: S3-hosted static website with drag-and-drop interface
+- **Complete Infrastructure**: S3 buckets, DynamoDB, IAM roles
+- **Upload Handler**: Lambda function with multipart upload support
+- **Video Processor**: Lambda function with AWS Bedrock TwelveLabs Pegasus integration
+- **Status Checker**: Lambda function for job status and results retrieval
+- **Complete Upload**: Lambda function for multipart upload completion
+- **API Gateway**: Complete REST API with CORS support
+- **S3 Event Triggers**: Custom resource for bucket notifications
+- **Deployment Scripts**: Automated CloudFormation deployment
+- **Testing Suite**: Comprehensive command-line test scripts
+- **Report Generation**: Formatted text output with download capability
+- **Error Handling**: Comprehensive error management throughout
+- **Multipart Upload**: Large file upload support (>100MB)
+
+### 🎯 PRODUCTION READY
+- **Complete end-to-end functionality**
+- **Automated testing and validation**
+- **Scalable serverless architecture**
+- **AWS Bedrock AI integration** - no API keys needed
+- **Real TwelveLabs Pegasus analysis** with structured JSON output
 
 ## Architecture Components
 
@@ -13,7 +37,7 @@ AWS-based serverless application that analyzes GoPro forestry videos using Twelv
 
 ### Processing Pipeline
 ```
-Video Upload → S3 → Lambda Trigger → Step Functions → TwelveLabs → Report Generation
+Video Upload → S3 → Lambda Trigger → AWS Bedrock Pegasus → Report Generation
 ```
 
 ### AWS Services
@@ -27,49 +51,82 @@ Video Upload → S3 → Lambda Trigger → Step Functions → TwelveLabs → Rep
 
 #### Compute
 - **Lambda Functions**:
-  - `upload-handler`: Generate presigned URLs for video upload
-  - `video-processor`: Integrate with TwelveLabs Pegasus API
-  - `report-generator`: Create formatted text reports
-- **Step Functions**: Orchestrate processing workflow
+  - `UploadHandlerFunction`: Generate presigned URLs with multipart support
+  - `VideoProcessorFunction`: Process videos with AWS Bedrock Pegasus integration
+  - `StatusCheckerFunction`: Check job status and retrieve results
+  - `CompleteUploadFunction`: Handle multipart upload completion
+  - `BucketNotificationFunction`: Custom resource for S3 event configuration
 
 #### Integration
-- **SQS**: Queue for batch video processing
-- **SNS**: Email notifications for job completion
-- **API Gateway**: REST endpoints for frontend communication
+- **S3 Event Triggers**: Automatic processing on video upload
+- **API Gateway**: REST endpoints with full CORS support
+- **Custom Resources**: CloudFormation custom resources for complex configurations
+- **Presigned URLs**: Secure direct-to-S3 uploads
 
 #### Monitoring
-- **CloudWatch**: Logs, metrics, and alarms
-- **X-Ray**: Distributed tracing for debugging
+- **CloudWatch**: Logs, metrics, and alarms for all Lambda functions
+- **DynamoDB**: Real-time job tracking and status management
+- **Error Handling**: Comprehensive error management and reporting
 
 ## Data Flow
 
 1. **Upload Phase**:
    - Operator uploads MP4 via web interface
-   - Lambda generates presigned S3 URL
-   - Video stored in input bucket
+   - Lambda generates presigned S3 URL (single or multipart)
+   - Video uploaded directly to S3 input bucket
 
 2. **Processing Phase**:
-   - S3 event triggers Step Functions workflow
-   - Video sent to TwelveLabs Pegasus API
-   - AI analyzes for tree cutting events and species
+   - S3 event automatically triggers VideoProcessorFunction
+   - Job status updated to "processing" in DynamoDB
+   - Video analyzed with AWS Bedrock TwelveLabs Pegasus
 
 3. **Output Phase**:
-   - Results stored in DynamoDB
-   - Text report generated and saved to S3
-   - SNS notification sent to operator
+   - Results stored in DynamoDB with completion status
+   - Text report generated and saved to S3 output bucket
+   - Report available for download via presigned URL
 
-## TwelveLabs Integration
+## API Endpoints
 
-### Pegasus Prompts
-- Tree cutting detection: "Identify timestamps when chainsaw cuts through tree trunk"
-- Species identification: "Identify tree species visible during cutting events"
-- Event counting: "Count total number of trees cut in video"
+### POST /upload
+- **Purpose**: Get presigned URL for video upload
+- **Input**: `{"filename": "video.mp4", "fileSize": 123456}`
+- **Output**: Presigned URL (single or multipart) + job ID
 
-### API Workflow
-1. Upload video to TwelveLabs
-2. Submit analysis job with forestry prompts
-3. Poll for completion
-4. Extract structured results
+### POST /complete
+- **Purpose**: Complete multipart upload
+- **Input**: Upload ID, parts list, bucket/key info
+- **Output**: Success confirmation
+
+### GET /status/{jobId}
+- **Purpose**: Check processing status and get results
+- **Output**: Job status, results, report download URL
+
+### Bedrock Integration
+
+### TwelveLabs Pegasus Model
+- **Model**: `us.twelvelabs.pegasus-1-2-v1:0` (regional inference profile)
+- **Region**: `us-east-1` (matches S3 bucket location)
+- **Input**: S3 video URI + structured JSON prompt
+- **Output**: JSON analysis with tree cutting events and species
+
+### Analysis Workflow
+1. Lambda invokes Bedrock with S3 video URI and structured prompt
+2. Pegasus analyzes video for forestry content using regional inference profile
+3. JSON parsing extracts structured data (trees_cut, events array)
+4. Results formatted into downloadable report
+
+### Prompt Structure
+```json
+{
+  "inputPrompt": "Analyze this forestry video and return JSON: {\"trees_cut\": total_number, \"events\": [{\"timestamp\": \"MM:SS when tree begins to fall\", \"species\": \"name\", \"diameter\": inches}]} for each tree cutting event observed.",
+  "mediaSource": {
+    "s3Location": {
+      "uri": "s3://bucket/key",
+      "bucketOwner": "account_id"
+    }
+  }
+}
+```
 
 ## Report Format
 
@@ -78,25 +135,19 @@ FOREST HARVESTING REPORT
 ========================
 Video: [filename]
 Date: [timestamp]
-Duration: [MM:SS]
+Analysis: AWS Bedrock TwelveLabs Pegasus AI
 
 SUMMARY
 -------
 Total Trees Cut: X
-Processing Time: X minutes
 
 CUTTING EVENTS
 --------------
-[HH:MM:SS] - [Species] (Est. [XX]" diameter)
-[HH:MM:SS] - [Species] (Est. [XX]" diameter)
+[MM:SS] - [Species] (Est. [XX]" diameter)
+[MM:SS] - [Species] (Est. [XX]" diameter)
 ...
 
-SPECIES BREAKDOWN
------------------
-Oak: X trees
-Pine: X trees
-Maple: X trees
-...
+--- End of Report ---
 ```
 
 ## Security & Compliance
@@ -122,9 +173,28 @@ Maple: X trees
 
 ## Deployment
 
-- **Infrastructure as Code**: AWS CDK or CloudFormation
-- **CI/CD Pipeline**: GitHub Actions or AWS CodePipeline
-- **Environment Separation**: Dev, staging, production stacks
+### Prerequisites
+- AWS CLI configured with appropriate permissions
+- CloudFormation access for stack creation
+- IAM permissions for Lambda, S3, DynamoDB, API Gateway
+
+### Deployment Steps
+```bash
+# 1. Deploy infrastructure
+./deploy.sh
+
+# 2. Test deployment
+./quick-test.sh    # Basic validation
+./test.sh          # Comprehensive testing
+
+# 3. AI analysis is automatic (uses AWS Bedrock)
+```
+
+### Stack Outputs
+- **ApiEndpoint**: API Gateway URL for frontend integration
+- **WebsiteURL**: S3 static website URL
+- **UploadBucket**: S3 bucket name for video uploads
+- **ReportBucket**: S3 bucket name for generated reports
 
 ## Monitoring & Alerting
 

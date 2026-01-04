@@ -20,23 +20,31 @@ echo "📍 Deploying to Account: $ACCOUNT_ID, Region: $REGION"
 
 # Deploy CloudFormation stack
 echo "🚀 Deploying infrastructure..."
+STACK_NAME="forest-video-analyzer"
+
+echo "🚀 Deploying complete infrastructure with stack name: $STACK_NAME"
 aws cloudformation deploy \
-    --template-file infrastructure-simple.yaml \
-    --stack-name forest-video-analyzer \
-    --capabilities CAPABILITY_IAM \
+    --template-file infrastructure-complete.yaml \
+    --stack-name $STACK_NAME \
+    --capabilities CAPABILITY_NAMED_IAM \
     --region $REGION
 
-# Get API Gateway URL
+# Get outputs
 API_URL=$(aws cloudformation describe-stacks \
-    --stack-name forest-video-analyzer \
+    --stack-name $STACK_NAME \
     --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
     --output text \
     --region $REGION)
 
-# Get Website URL
 WEBSITE_URL=$(aws cloudformation describe-stacks \
-    --stack-name forest-video-analyzer \
+    --stack-name $STACK_NAME \
     --query 'Stacks[0].Outputs[?OutputKey==`WebsiteURL`].OutputValue' \
+    --output text \
+    --region $REGION)
+
+UPLOAD_BUCKET=$(aws cloudformation describe-stacks \
+    --stack-name $STACK_NAME \
+    --query 'Stacks[0].Outputs[?OutputKey==`UploadBucket`].OutputValue' \
     --output text \
     --region $REGION)
 
@@ -46,9 +54,15 @@ echo "🔗 API Gateway URL: $API_URL"
 echo "📝 Updating frontend configuration..."
 sed -i.bak "s|https://YOUR_API_GATEWAY_URL/prod|$API_URL|g" frontend/index.html
 
+WEBSITE_BUCKET=$(aws cloudformation describe-stacks \
+    --stack-name $STACK_NAME \
+    --query 'Stacks[0].Outputs[?OutputKey==`WebsiteURL`].OutputValue' \
+    --output text \
+    --region $REGION | cut -d'/' -f3)
+
 # Upload website to S3
 echo "📤 Uploading website..."
-aws s3 sync frontend/ s3://forest-website-$ACCOUNT_ID --delete --region $REGION
+aws s3 sync frontend/ s3://$WEBSITE_BUCKET --delete --region $REGION
 
 # Set bucket policy for public website access
 echo "🌐 Setting up public website access..."
@@ -61,29 +75,46 @@ cat > bucket-policy.json << EOF
             "Effect": "Allow",
             "Principal": "*",
             "Action": "s3:GetObject",
-            "Resource": "arn:aws:s3:::forest-website-$ACCOUNT_ID/*"
+            "Resource": "arn:aws:s3:::$(echo $WEBSITE_URL | cut -d'/' -f3)/*"
         }
     ]
 }
 EOF
 
+# Get website bucket name from URL
+WEBSITE_BUCKET_NAME=$(echo $WEBSITE_URL | cut -d'/' -f3)
+
+# Disable public access block and set policy
+aws s3api put-public-access-block \
+    --bucket $WEBSITE_BUCKET_NAME \
+    --public-access-block-configuration BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false \
+    --region $REGION
+
 aws s3api put-bucket-policy \
-    --bucket forest-website-$ACCOUNT_ID \
+    --bucket $WEBSITE_BUCKET_NAME \
     --policy file://bucket-policy.json \
     --region $REGION
 
 rm bucket-policy.json
 
+# Add CORS to upload bucket
+echo "🔧 Configuring CORS for upload bucket..."
+aws s3api put-bucket-cors --bucket $UPLOAD_BUCKET --cors-configuration '{
+  "CORSRules": [
+    {
+      "AllowedHeaders": ["*"],
+      "AllowedMethods": ["GET", "PUT", "POST"],
+      "AllowedOrigins": ["*"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+}' --region $REGION
+
 echo "✅ Deployment completed successfully!"
 echo ""
 echo "🌐 Website URL: $WEBSITE_URL"
 echo "🔗 API Endpoint: $API_URL"
+echo "📹 Upload Bucket: $UPLOAD_BUCKET"
 echo ""
-echo "📋 Next Steps:"
-echo "1. Set up TwelveLabs API key (optional):"
-echo "   aws lambda update-function-configuration --function-name forest-video-processor --environment Variables='{TWELVELABS_API_KEY=your_api_key,TWELVELABS_INDEX_ID=your_index_id}'"
-echo ""
-echo "2. Test the application by uploading an MP4 video at: $WEBSITE_URL"
-echo ""
-echo "3. Monitor logs with:"
-echo "   aws logs tail /aws/lambda/forest-video-processor --follow"
+echo "📋 Videos will be uploaded to: $UPLOAD_BUCKET"
